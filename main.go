@@ -2,35 +2,22 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
+	"sample-web-api/helpers"
+	"sample-web-api/models"
 
 	"github.com/gorilla/mux"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// Object - Our struct for all objects
-type Object struct {
-	Id    string `json:"Id"`
-	Title string `json:"Title"`
-	Desc  string `json:"desc"`
-	Body  string `json:"body"`
-}
+var Objects []models.Object
 
-var Objects []Object
-
-func readJsonFile() []Object {
-	raw, err := ioutil.ReadFile("./objects.json")
-	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(1)
-	}
-	json.Unmarshal(raw, &Objects)
-	return Objects
-}
+var ctx = helpers.ConnectDB()
 
 func homePage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Welcome to the HomePage!")
@@ -39,91 +26,127 @@ func homePage(w http.ResponseWriter, r *http.Request) {
 
 func returnAllObjects(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Endpoint Hit: returnAllObjects")
+
+	raw, err := ctx.Find(context.TODO(), bson.M{})
+
+	if err != nil {
+		helpers.GetError(err, w)
+		return
+	}
+
+	defer raw.Close(context.TODO())
+
+	for raw.Next(context.TODO()) {
+
+		var obj models.Object
+
+		err := raw.Decode(&obj)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		Objects = append(Objects, obj)
+	}
+
 	json.NewEncoder(w).Encode(Objects)
 }
 
 func returnSingleObject(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	key := vars["id"]
 
-	for _, object := range Objects {
-		if object.Id == key {
-			json.NewEncoder(w).Encode(object)
-		}
+	var obj models.Object
+
+	id, _ := primitive.ObjectIDFromHex(vars["id"])
+
+	filter := bson.M{"_id": id}
+	err := ctx.FindOne(context.TODO(), filter).Decode(&obj)
+
+	if err != nil {
+		helpers.GetError(err, w)
+		return
 	}
+
+	json.NewEncoder(w).Encode(obj)
 }
 
 func createNewObject(w http.ResponseWriter, r *http.Request) {
 
-	reqBody, _ := ioutil.ReadAll(r.Body)
-	var object Object
-	json.Unmarshal(reqBody, &object)
+	var obj models.Object
 
-	if !exists(object, Objects) {
+	// we decode our body request params
+	_ = json.NewDecoder(r.Body).Decode(&obj)
 
-		Objects = append(Objects, object)
+	// insert our book model.
+	result, err := ctx.InsertOne(context.TODO(), obj)
 
-		json.NewEncoder(w).Encode(object)
-		file, _ := json.MarshalIndent(Objects, "", "")
-		_ = ioutil.WriteFile("objects.json", file, 0644)
-	} else {
-		json.NewEncoder(w).Encode("Id already exists.")
+	if err != nil {
+		helpers.GetError(err, w)
+		return
 	}
+
+	json.NewEncoder(w).Encode(result)
 }
 
 func updateObject(w http.ResponseWriter, r *http.Request) {
 
-	i := 0
+	var vars = mux.Vars(r)
 
-	reqBody, _ := ioutil.ReadAll(r.Body)
-	var object Object
-	json.Unmarshal(reqBody, &object)
+	//Get id from parameters
+	id, _ := primitive.ObjectIDFromHex(vars["id"])
 
-	if exists(object, Objects) {
+	var obj models.Object
 
-		//find index of the existing value
-		for index, obj := range Objects {
-			if obj.Id == object.Id {
-				i = index
-			}
-		}
+	// Create filter
+	filter := bson.M{"_id": id}
 
-		Objects[i].Body = object.Body
-		Objects[i].Desc = object.Desc
-		Objects[i].Title = object.Title
+	// Read update model from body request
+	_ = json.NewDecoder(r.Body).Decode(&obj)
 
-		json.NewEncoder(w).Encode(object)
-		file, _ := json.MarshalIndent(Objects, "", "")
-		_ = ioutil.WriteFile("objects.json", file, 0644)
-	} else {
-		json.NewEncoder(w).Encode("Id does not exist, can not update.")
+	// prepare update model.
+	update := bson.D{
+		{"$set", bson.D{
+			{"title", obj.Title},
+			{"body", obj.Body},
+			{"desc", obj.Desc},
+		}},
 	}
+
+	err := ctx.FindOneAndUpdate(context.TODO(), filter, update).Decode(&obj)
+
+	if err != nil {
+		helpers.GetError(err, w)
+		return
+	}
+
+	obj.Id = id
+
+	json.NewEncoder(w).Encode(obj)
 }
 
 func deleteObject(w http.ResponseWriter, r *http.Request) {
 
-	reqBody, _ := ioutil.ReadAll(r.Body)
-	var object Object
-	json.Unmarshal(reqBody, &object)
+	var vars = mux.Vars(r)
 
-	if exists(object, Objects) {
+	// string to primitve.ObjectID
+	id, err := primitive.ObjectIDFromHex(vars["id"])
 
-		for index, obj := range Objects {
-			if obj.Id == object.Id {
-				Objects = append(Objects[:index], Objects[index+1:]...)
-			}
-		}
+	// prepare filter.
+	filter := bson.M{"_id": id}
 
-		json.NewEncoder(w).Encode(object)
-		file, _ := json.MarshalIndent(Objects, "", "")
-		_ = ioutil.WriteFile("objects.json", file, 0644)
-	} else {
-		json.NewEncoder(w).Encode("Id does not exist, can not")
+	result, err := ctx.DeleteOne(context.TODO(), filter)
+
+	if err != nil {
+		helpers.GetError(err, w)
+		return
 	}
+
+	json.NewEncoder(w).Encode(result)
 
 }
 
 func handleRequests() {
+	config := helpers.GetConfiguration()
+
 	myRouter := mux.NewRouter().StrictSlash(true)
 	myRouter.HandleFunc("/", homePage)
 	myRouter.HandleFunc("/objects", returnAllObjects)
@@ -131,10 +154,9 @@ func handleRequests() {
 	myRouter.HandleFunc("/objects/update", updateObject).Methods("PATCH")
 	myRouter.HandleFunc("/objects/remove", deleteObject).Methods("DELETE")
 	myRouter.HandleFunc("/objects/{id}", returnSingleObject)
-	log.Fatal(http.ListenAndServe(":10000", myRouter))
+	log.Fatal(http.ListenAndServe(config.Port, myRouter))
 }
 
 func main() {
-	readJsonFile()
 	handleRequests()
 }
